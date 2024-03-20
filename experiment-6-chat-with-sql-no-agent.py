@@ -21,7 +21,7 @@ st.set_page_config(
     page_title=LANGCHAIN_PROJECT,
     page_icon="🌄"
 )
-config_dir = Path(r"C:\Users\sreed\OneDrive - West Monroe Partners\BD-Folders\WAB","config")
+config_dir_path = Path(r"C:\Users\sreed\OneDrive - West Monroe Partners\BD-Folders\WAB") / "config"
 
 # add separate memory thread for each tab
 tab_titles=[
@@ -30,16 +30,17 @@ tab_titles=[
     "LLM + SQL Execution Agent",
     "LLM + Python Agent",
     "LLM + Visualization Agent"
-
 ]
 sql_tab, llm_tab, sql_agent_tab, python_agent_tab, visualization_tab  = st.tabs(tab_titles)
+tab_handles = [sql_tab, llm_tab, sql_agent_tab, python_agent_tab, visualization_tab]
 
-with llm_tab:
-    st.title("LLM")
-    
-def load_schema_from_file(file, dir = config_dir):
+#set title at top of tab 
+for tab_heading, tab_handle in zip(tab_titles, tab_handles):
+    tab_handle.title(tab_heading)
+   
+def load_schema_from_file(file, dir = config_dir_path):
     try:
-        file_path = Path(dir, file)
+        file_path = dir / file
         with open(file_path, 'r') as f:
             schema = f.read()
         assert schema is not None
@@ -49,7 +50,7 @@ def load_schema_from_file(file, dir = config_dir):
         logger.error(e)
 
 uploaded_schema = load_schema_from_file(file="DDL_for_LLM_upload.sql")
-def run_azure_config(config_dir = config_dir):
+def run_azure_config(config_dir = config_dir_path):
     all_config_file_path = config_dir / "allconfig.json"
     config = {}
     with open(all_config_file_path) as json_config:
@@ -59,15 +60,16 @@ def run_azure_config(config_dir = config_dir):
 
     os.environ["LANGCHAIN_PROJECT"] = LANGCHAIN_PROJECT
 
-@st.cache_resource(ttl="2h")
-def get_db_engine(db_config_file="dbconfig.json", config_dir = config_dir, **kwargs):
+@st.cache_resource(ttl="4h")
+def get_db_engine(db_config_file="dbconfig.json", config_dir_path = config_dir_path, **kwargs):
     
     if not kwargs: 
         kwargs = {"schema":"sandbox"}
     
-    def get_wab_connection_string(db_config_file=db_config_file, config_dir=config_dir ):
+    @st.cache_resource(ttl="4h")    
+    def get_wab_connection_string(db_config_file=db_config_file, config_dir_path=config_dir_path ):
         driver= '{ODBC Driver 18 for SQL Server}'
-        db_config_path = config_dir / db_config_file
+        db_config_path = config_dir_path / db_config_file
 
         with open(db_config_path) as json_file:
             dbconfig = json.load(json_file)
@@ -97,12 +99,13 @@ class StreamHandler(BaseCallbackHandler):
         self.container.markdown(self.text)
 
 run_azure_config()
-db = get_db_engine()
 
-SCHEMA_FILEPATH  = (Path.cwd()) / "DDL_for_LLM_upload.sql"
-uploaded_schema = f"{load_schema_from_file(SCHEMA_FILEPATH)}"
+with llm_tab:
+    SCHEMA_FILEPATH  = config_dir_path / "DDL_for_LLM_upload_sample.sql"
+    uploaded_schema = f"{load_schema_from_file(SCHEMA_FILEPATH)}"
 
-with st.sidebar:
+with sql_tab:
+    db = get_db_engine()
     q = """
     SELECT TABLE_NAME
     FROM INFORMATION_SCHEMA.TABLES
@@ -117,48 +120,53 @@ with st.sidebar:
         except Exception as e:
             st.error(e)
 
-if "messages" not in st.session_state:
-    system_message = f"""
-    You are an expert at writing Mircosoft SQL database queries and T-SQL code. 
-      When asked to write SQL queries use the following schema
-     \n\n\n
-    {uploaded_schema}
-     \n\n\n
-     After writing a query, score its estimated accuracy in answering the 
-      user's question on a scale of 1-5, with 1 the lowest score and 5 the 
-      highest possible. Respond with the query and the accuracy score. If you give
-      an accuracy score of 1 or 2, briefly state your reason.
-     """
-    st.session_state["system_message"] = ChatMessage(role="system", content=system_message)
-    st.session_state["messages"] = [ChatMessage(role="system", content=system_message), 
-                                    ChatMessage(role="assistant", content="How can I help you?")
-                                    ]
-
+def reset_llm_only_tab():
+    st.session_state["reset_llm_only_tab"] = True
     
 with llm_tab:
+    reset_button = st.button("Reset Chat")
+
+    if reset_button or ("messages" not in st.session_state):
+        st.session_state["messages"] = None
+        
+        system_message = f"""
+        You are an expert at writing Mircosoft SQL database queries and T-SQL code. 
+        When asked to write SQL queries use the following schema
+        \n\n\n
+        {uploaded_schema}
+        \n\n\n
+        After writing a query, score its estimated accuracy in answering the 
+        user's question on a scale of 1-5, with 1 the lowest score and 5 the 
+        highest possible. Respond with the query and the accuracy score. If you give
+        an accuracy score of 1 or 2, briefly state your reason.
+        """
+        # st.session_state["system_message"] = ChatMessage(role="system", content=system_message)
+        st.session_state["messages"] = [ChatMessage(role="system", content=system_message), 
+                                        ChatMessage(role="assistant", content="How can I help you?")
+                                        ]
+
     for msg in st.session_state.messages:
         if msg.role != "system":
             st.chat_message(msg.role).write(msg.content)
-
 
     if prompt := st.chat_input():
         st.session_state.messages.append(ChatMessage(role="user", content=prompt))
         st.chat_message("user").write(prompt)
 
 
-    with st.chat_message("assistant"):
-        stream_handler = StreamHandler(st.empty())
-        llm = AzureChatOpenAI(
-            temperature=0,
-            streaming=True,
-            max_tokens=1000,
-            azure_deployment=os.environ["AZURE_OPENAI_API_DEPLOYMENT_NAME_GPT35"],
-            azure_endpoint=os.environ["AZURE_OPENAI_API_ENDPOINT"],
-            model_name=os.environ["MODEL_NAME_GPT35"],
-            openai_api_version=os.environ["AZURE_OPENAI_API_VERSION"],
-            request_timeout=45,
-            verbose=True,
-            callbacks=[stream_handler]
-        )
-        response = llm.invoke(st.session_state.messages)
-        st.session_state.messages.append(ChatMessage(role="assistant", content=response.content))
+        with st.chat_message("assistant"):
+            stream_handler = StreamHandler(st.empty())
+            llm = AzureChatOpenAI(
+                temperature=0,
+                streaming=True,
+                max_tokens=800,
+                azure_deployment=os.environ["AZURE_OPENAI_API_DEPLOYMENT_NAME_GPT35"],
+                azure_endpoint=os.environ["AZURE_OPENAI_API_ENDPOINT"],
+                model_name=os.environ["MODEL_NAME_GPT35"],
+                openai_api_version=os.environ["AZURE_OPENAI_API_VERSION"],
+                request_timeout=45,
+                verbose=True,
+                callbacks=[stream_handler]
+            )
+            response = llm.invoke(st.session_state.messages)
+            st.session_state.messages.append(ChatMessage(role="assistant", content=response.content))
