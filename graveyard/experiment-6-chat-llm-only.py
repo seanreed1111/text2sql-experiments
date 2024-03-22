@@ -1,9 +1,7 @@
 from pathlib import Path
-import ast 
 import os
 import json
 import streamlit as st
-import pandas as pd
 from langchain_openai import AzureChatOpenAI
 # from langchain_community.chat_models.azure_openai import AzureChatOpenAI #deprecated class, fix later
 # from langchain.agents import create_sql_agent
@@ -18,7 +16,6 @@ from langchain.callbacks.base import BaseCallbackHandler
 from langchain.schema import ChatMessage
 from loguru import logger
 
-# streamlit examples: https://streamlit.io/generative-ai
 LANGCHAIN_PROJECT = "experiment-6-chat-with-sql-no-agent"
 st.set_page_config(
     page_title=LANGCHAIN_PROJECT,
@@ -28,24 +25,18 @@ config_dir_path = Path(r"C:\Users\sreed\OneDrive - West Monroe Partners\BD-Folde
 
 # add separate memory thread for each tab
 tab_titles=[
-    "LLM Only",
     "SQL Connection w/o LLM",
+    "LLM Only",
     "LLM + SQL Execution Agent",
     "LLM + Python Agent",
     "LLM + Visualization Agent"
 ]
-# tabs = st.tabs(tab_titles)
-# tab_dict = {tab_title:tab_handle for tab_title, tab_handle in zip(tab_titles,tabs)}
-
-llm_tab, sql_tab, sql_agent_tab, python_agent_tab, visualization_tab  = st.tabs(tab_titles)
-tab_handles = [llm_tab, sql_tab, sql_agent_tab, python_agent_tab, visualization_tab]
-
-tab_dict = {tab_title:tab_handle for tab_title, tab_handle in zip(tab_titles,tab_handles)}
+sql_tab, llm_tab, sql_agent_tab, python_agent_tab, visualization_tab  = st.tabs(tab_titles)
+tab_handles = [sql_tab, llm_tab, sql_agent_tab, python_agent_tab, visualization_tab]
 
 #set title at top of tab 
 for tab_heading, tab_handle in zip(tab_titles, tab_handles):
     tab_handle.title(tab_heading)
-    
    
 def load_schema_from_file(file, dir = config_dir_path):
     try:
@@ -69,8 +60,6 @@ def run_azure_config(config_dir = config_dir_path):
 
     os.environ["LANGCHAIN_PROJECT"] = LANGCHAIN_PROJECT
 
-#### Need get_db_engine to run asynchronously
-@logger.catch
 @st.cache_resource(ttl="4h")
 def get_db_engine(db_config_file="dbconfig.json", config_dir_path = config_dir_path, **kwargs):
     
@@ -100,16 +89,20 @@ def get_db_engine(db_config_file="dbconfig.json", config_dir_path = config_dir_p
                                 **kwargs
                                )
 
-# class StreamHandler(BaseCallbackHandler):
-#     def __init__(self, container, initial_text=""):
-#         self.container = container
-#         self.text = initial_text
+class StreamHandler(BaseCallbackHandler):
+    def __init__(self, container, initial_text=""):
+        self.container = container
+        self.text = initial_text
 
-#     def on_llm_new_token(self, token: str, **kwargs) -> None:
-#         self.text += token
-#         self.container.markdown(self.text)
+    def on_llm_new_token(self, token: str, **kwargs) -> None:
+        self.text += token
+        self.container.markdown(self.text)
 
 run_azure_config()
+
+with llm_tab:
+    SCHEMA_FILEPATH  = config_dir_path / "DDL_for_LLM_upload_sample.sql"
+    uploaded_schema = f"{load_schema_from_file(SCHEMA_FILEPATH)}"
 
 with sql_tab:
     db = get_db_engine()
@@ -127,34 +120,10 @@ with sql_tab:
         except Exception as e:
             st.error(e)
 
-    # have user enter their query
-    # execute query in SQLDatabase
-    # return results inside a pandas dataframe
-    query = st.text_input(label="Enter a SQL query", value="select top 2 *FROM sandbox.ACCOUNT_CATEGORY_TYPE")
-
-    if query:
-        try:
-            results = db.run(query)
-            # st.text(results)
-            # st.text(f"type of results is:{type(results)}") #DB returns a string representation. need to make into json
-            python_obj_from_results = ast.literal_eval(results)
-            st.text(f"type of python_obj_from_results is:{type(python_obj_from_results)}") #type:list
-            # write a function that lets you return the column names to put on top of results
-
-            regular_df = pd.DataFrame(python_obj_from_results)
-            st.dataframe(regular_df, use_container_width=True)
-            st.data_editor(regular_df) #editable dataframe
-        except Exception as e:
-            logger.error(e)
-            st.error(e)
-
 # def reset_llm_only_tab():
 #     st.session_state["reset_llm_only_tab"] = True
-
-# start thinking about chat memory. maybe keep system message plus last N items
+    
 with llm_tab:
-    SCHEMA_FILEPATH  = config_dir_path / "DDL_for_LLM_upload_sample.sql"
-    uploaded_schema = f"{load_schema_from_file(SCHEMA_FILEPATH)}"
     reset_button = st.button("Reset Chat")
 
     if reset_button or ("messages" not in st.session_state):
@@ -180,17 +149,16 @@ with llm_tab:
         if msg.role != "system":
             st.chat_message(msg.role).write(msg.content)
 
-    # what is the difference between chat_input and text_input?
-    if prompt := st.chat_input():  #prompt written on top
+    if prompt := st.chat_input():
         st.session_state.messages.append(ChatMessage(role="user", content=prompt))
         st.chat_message("user").write(prompt)
 
 
         with st.chat_message("assistant"):
-            # stream_handler = StreamHandler(st.empty())
+            stream_handler = StreamHandler(st.empty())
             llm = AzureChatOpenAI(
                 temperature=0,
-                streaming=False,
+                streaming=True,
                 max_tokens=800,
                 azure_deployment=os.environ["AZURE_OPENAI_API_DEPLOYMENT_NAME_GPT35"],
                 azure_endpoint=os.environ["AZURE_OPENAI_API_ENDPOINT"],
@@ -198,7 +166,7 @@ with llm_tab:
                 openai_api_version=os.environ["AZURE_OPENAI_API_VERSION"],
                 request_timeout=45,
                 verbose=True,
-                # callbacks=[stream_handler]
+                callbacks=[stream_handler]
             )
             response = llm.invoke(st.session_state.messages)
             st.session_state.messages.append(ChatMessage(role="assistant", content=response.content))
